@@ -1,6 +1,6 @@
 # Spores
 
-All relevant data from the recent paper is included in this repository: 
+All relevant data from the recent paper: 
 
 Kearney SM, Gibbons SM, Poyet M, Gurry T, Bullock K, Allegretti JR, Clish CB, Alm EJ. ``Endospore formers in the human gut trade off within-host persistence for cross-host transmission.'' In press, ISMEJ, March 2018.
 
