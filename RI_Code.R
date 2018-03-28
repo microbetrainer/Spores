@@ -30,34 +30,48 @@ poi.cts <- function(otu.tab,nboot=100){
   
 }
 
-resist_index <- function(otus1,otus2,spore.i,whole.i,rng=1:length(spore.i),normalize=T,poiss=T,dev=2,rem.inf=T,qct=0){
+resist_index <- function(otus1,otus2,spore.i,whole.i,rng=1:length(spore.i),normalize=T,poiss=T,dev=2,rem.inf=T,qct=0,rnk=F){
   resist.index <- matrix(NA,dim(otus1)[1],length(spore.i))
   k <- 1
-  for (i in rng){
-    sp.a <- otus1[,spore.i[k]]; 
-    sp.b <- otus2[,whole.i[k]]; 
-    if (poiss){
-      vps <- sqrt(sp.a + sp.b)
-      aps <- abs(sp.a-sp.b)
-      ips <- which(aps < dev*vps)
+  if (rnk){
+    for (i in rng){
+      sp.a <- otus1[,spore.i[k]]
+      sp.b <- otus2[,whole.i[k]]
+      sp.u <- which(sp.a > 0 & sp.b > 0)
+      rnk.a <- rank(sp.a[sp.u])
+      rnk.b <- rank(sp.b[sp.u])
+      rnk.d <- rnk.a - rnk.b
+      resist.index[sp.u,k] <- rnk.d
+      k = k + 1
     }
-    else{
-      ips <- NULL
-    }
-    if (normalize){
-      sp.a <- sp.a/sum(sp.a,na.rm=T)
-      sp.b <- sp.b/sum(sp.b,na.rm=T)
-    }
-    sp.i <- sp.a/sp.b
-    if (qct > 0){
-      sp.qb <- which(sp.b < quantile(sp.b[sp.b > 0],qct))
-      sp.i[sp.qb] <- NA
-    }
-    # exclude estimates which are bad b/c of low read counts in both samples
-    sp.i[ips] <- NA
-    resist.index[,k] <- sp.i
-    k = k + 1
-  }  
+  }
+  else {
+    for (i in rng){
+      sp.a <- otus1[,spore.i[k]]; 
+      sp.b <- otus2[,whole.i[k]]; 
+      if (poiss){
+        vps <- sqrt(sp.a + sp.b)
+        aps <- abs(sp.a-sp.b)
+        ips <- which(aps < dev*vps)
+      }
+      else{
+        ips <- NULL
+      }
+      if (normalize){
+        sp.a <- sp.a/sum(sp.a,na.rm=T)
+        sp.b <- sp.b/sum(sp.b,na.rm=T)
+      }
+      sp.i <- sp.a/sp.b
+      if (qct > 0){
+        sp.qb <- which(sp.b < quantile(sp.b[sp.b > 0],qct))
+        sp.i[sp.qb] <- NA
+      }
+      # exclude estimates which are bad b/c of low read counts in both samples
+      sp.i[ips] <- NA
+      resist.index[,k] <- sp.i
+      k = k + 1
+    }  
+  }
   colnames(resist.index) <- colnames(otus1)[whole.i]
   rownames(resist.index) <- rownames(otus1)
   # remove 0 over 0
@@ -149,7 +163,8 @@ ss.ids <- c(25:48)
 
 # this function looks good 
 # finds statistically significant OTUs differing between samples
-otu.rss <- resist_index(otu.css,otu.css,ss.ids,ss.idw,normalize=F,dev=2,rem.inf=T)
+otu.rss <- resist_index(otu.css,otu.css,ss.ids,ss.idw,normalize=F,dev=0,rem.inf=F)
+
 
 # counts the total # of times an OTU is seen
 otu.fq1s <- apply(otu.cts[,ss.idw],1,function(x) sum(x > 0)) 
@@ -527,6 +542,92 @@ for (i in 1:17){
   dis.cw[i] <- length(dis.tt[[i]])
 }
 
+# test using significance test
+wilc.func <- function(otus,ind1,ind2){
+p.col <- c()
+d.col <- c()
+  for (i in 1:dim(otus)[1]){
+    x <- otus[i,ind1]
+    y <- otus[i,ind2]  
+    z <- x - y
+    if (x > 0 | y > 0){
+      p.col[i] <- wilcox.test(z[x > 0 | y > 0])$p.value
+      d.col[i] <- median(z[x > 0 | y > 0])
+    }
+    else {
+      p.col[i] <- 1
+      d.col[i] <- 0
+    }
+  }
+  return(list(p.col,d.col))
+}
+cs.wilc <- wilc.func(otu.css,ss.ids,ss.idw)
+
+# for analysis of cross-sectional eOTUs
+p.s <- cs.wilc[[1]]
+d.s <- cs.wilc[[2]]
+
+rs.s <- rownames(otu.css)[which(p.s < 0.05 & d.s > 0)]
+nr.s <- rownames(otu.css)[which(p.s > 0.05 & d.s < 0)]
+
+rs.a <- rownames(otu.css)[which(p.s < 1)[which(p.adjust(p.s[which(p.s < 1)],method="fdr") < 0.1 & d.s[which(p.s < 1)] >= 0)]]
+nr.1 <- rownames(otu.css)[which(p.s < 1)[which(p.adjust(p.s[which(p.s < 1)],method="fdr") < 0.1 & d.s[which(p.s < 1)] < 0)]]
+
+nr.a <- c(nr.1,rownames(otu.css)[which(p.s < 1)[which(p.adjust(p.s[which(p.s < 1)],method="fdr") > 0.1 & d.s[which(p.s < 1)] <= 0)]])
+nr.c <- nr.a[which(otu.fq1s[nr.a]+otu.fq2s[nr.a] >= 8)]
+
+prev.ns <- apply(otu.css[nr.c,ss.idw],2,function(x) length(x[x > 0]))/length(nr.c)
+prev.rs <- apply(otu.css[rs.a,ss.idw],2,function(x) length(x[x > 0]))/length(rs.a)
+
+# for analysis of time series eOTUs
+ts.wilc <- wilc.func(otu.css,ts.ids,ts.idw)
+p.t <- ts.wilc[[1]]
+d.t <- ts.wilc[[2]]
+
+rs.t <- rownames(otu.css)[which(p.t < 0.05 & d.t > 0)]
+nr.t <- rownames(otu.css)[which(p.t > 0.05 & d.t < 0)]
+
+rs.b <- rownames(otu.css)[which(p.t < 1)[which(p.adjust(p.t[which(p.t < 1)],method="fdr") < 0.1 & d.t[which(p.t < 1)] >= 0)]]
+nr.2 <- rownames(otu.css)[which(p.t < 1)[which(p.adjust(p.t[which(p.t < 1)],method="fdr") < 0.1 & d.t[which(p.t < 1)] < 0)]]
+
+nr.b <- c(nr.2,rownames(otu.css)[which(p.t < 1)[which(p.adjust(p.t[which(p.t < 1)],method="fdr") > 0.1)]])
+nr.d <- nr.b[which(otu.fq1t[nr.d]+otu.fq2t[nr.d] >= 5)]
 
 
+prev.nt <- apply(otu.css[nr.d,ts.ida],2,function(x) length(x[x > 0]))/length(nr.d)
+prev.rt <- apply(otu.css[rs.b,ts.ida],2,function(x) length(x[x > 0]))/length(rs.b)
+
+
+# no difference in sharing between organisms significantly underrepresented as spores and those significantly overrepresented as spores
+
+# downsample otu.cts to estimate overlap in sharing
+smp.siz <- seq(500,21700,100)
+otu.ov <- matrix(NA,nrow=dim(otu.rel)[1],ncol=length(smp.siz))
+for (i in 1:length(smp.siz)){
+  smp.arr <- round(smp.siz[i]*otu.rel[,ss.idw])
+  otu.ov[,i] <- apply(smp.arr,1,function(x) sum(x > 0)) 
+}
+
+frc.ov <- c()
+for (i in 1:length(smp.siz)){
+  frc.ov[i] <- sum(otu.ov[,i][otu.ov[,i] > 1])/sum(otu.ov[,length(smp.siz)][otu.ov[,length(smp.siz)] > 1])  
+}
+
+spo.arr <- round(18300*otu.rel[,ss.ids])
+blk.arr <- round(18300*otu.rel[,ss.idw])
+
+spo.ov <- matrix(NA,nrow=100,ncol=15)
+blk.ov <- matrix(NA,nrow=100,ncol=15)
+for (i in 1:100){
+  for (j in 2:16){
+    smp <- sample(1:24,j)  
+    otu.spo <- apply(spo.arr[,smp],1,function(x) sum(x > 0)) 
+    otu.blk <- apply(blk.arr[,smp],1,function(x) sum(x > 0))
+    spo.ov[i,j-1] <- sum(otu.spo > 1)
+    blk.ov[i,j-1] <- sum(otu.blk > 1)
+  }
+  print(i)
+}
+
+# there is a linear relationship between read-depth and fractional overlap of read counts across samples (ie )
 

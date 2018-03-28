@@ -1,0 +1,235 @@
+---
+title: "Spore Data Analysis"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+## Loading Data
+Load dada2 for uploading sequence table; tload metadata file
+```{r}
+library(dada2); packageVersion("dada2") # load dada2 
+path <- "/Users/skearney/Documents/Alm Lab/Spores/DADA2/Pooled" # change this to location of DADA2 files
+
+seqtab <- readRDS(paste(c(path,"/seqtab_final.rds"),collapse="")) # sequence table
+meta <- read.csv(paste(c(path,"/meta.csv"),collapse=""),row.names=1) # metadata file
+taxa <- readRDS(paste(c(path,"/rdp_tax.rds"),collapse=""))
+lcms <- read.table(paste(c(path,"/metabolomics_spores.txt"),collapse=""),sep="\t",header=T) # metabolomics data table
+```
+## PhyloSeq Analysis
+Load packages
+```{r}
+library(phyloseq); packageVersion("phyloseq")
+```
+```{r}
+library(ggplot2); packageVersion("ggplot2")
+```
+```{r}
+library(plyr); packageVersion("plyr")
+```
+```{r}
+library(patchwork); packageVersion("patchwork")
+```
+```{r}
+library(vegan); packageVersion("vegan")
+```
+```{r}
+library(reshape2)
+```
+Sequence Pre-Processing
+```{r}
+NEG <- match(rownames(subset(meta,TYPE == "NEGATIVE")),rownames(seqtab)) # find negative samples
+NEG.rel <- apply(seqtab[NEG,],1,function(x) x/sum(x)) # 
+NEG.sum <- colSums(NEG.rel) # combine negatives into a single vector 
+NEG.med <- apply(NEG.rel,1,median)
+NEG.nor <- NEG.med/sum(NEG.med) # normalize negatives vector
+NEG.rm <- which(NEG.sum > 0) # identify seqs that are present in negatives
+NEG.rf <- which(NEG.nor > 0.01) # remove sequences that are present at more than 1%
+seqtab.prune <- seqtab[-NEG,-NEG.rf] # remove negatives and seqs in the negatives
+tax.prune <- taxa[-NEG.rf,] # remove negative sample taxa from taxa
+
+cohort <- subset(meta,STUDY=="COHORT")
+
+seqtab.cs <- seqtab.prune[rownames(cohort),]
+
+ps.c <- phyloseq(otu_table(seqtab.cs,taxa_are_rows=F),sample_data(cohort),tax_table(tax.prune)) # make phyloseq object for cross-sectional samples
+min.depth.c <- min(rowSums(otu_table(ps.c))) # find minimum read depth of samples
+ps.c1 <- transform_sample_counts(ps.c,function(x) round(min.depth.c*x/sum(x))) # normalize samples to same number of counts 
+```
+calculating alpha-diversity metrics 
+```{r}
+shannon <- apply(seqtab.cs,1,diversity)
+observed <- apply(seqtab.cs,1,function(x) sum(x > 0))
+alpha.c <- as.data.frame(matrix(NA,nrow=48,ncol=1))
+alpha.c[,"Observed"] <- observed
+alpha.c[,"Shannon"] <- shannon
+alpha.c[,"SUBJECT"] <- cohort$SUBJECT
+alpha.c[,"TYPE"] <- cohort$TYPE
+alpha.c[,"Equitability"] <- alpha.c$Shannon/log(alpha.c$Observed)
+alpha.res <- subset(alpha.c,TYPE=='RESIST')
+alpha.blk <- subset(alpha.c,TYPE=='BULK')
+rich.sig <- wilcox.test(alpha.blk$Observed,y=alpha.res$Observed,paired=T)
+even.sig <- wilcox.test(alpha.blk$Equitability,y=alpha.res$Equitability,paired=T)
+shan.sig <- wilcox.test(alpha.blk$Shannon,y=alpha.res$Shannon,paired=T)
+
+# print p-value
+rich.p <- as.character(signif(rich.sig$p.value,4)) 
+even.p <- as.character(signif(even.sig$p.value,4))
+shan.p <- as.character(signif(shan.sig$p.value,4))
+
+# a bunch of ggplot gobbledy-gook to generate figure 2A 
+p1 <- qplot(x=alpha.blk$Observed,y=alpha.res$Observed) + geom_point() + geom_abline(slope=1,intercept=0,linetype="dashed") + theme_gray() + xlab("Bulk Observed") + ylab("Resistant Fraction Observed") + ggtitle("Observed # Species") + xlim(min(alpha.c$Observed),max(alpha.c$Observed)) + ylim(min(alpha.c$Observed),max(alpha.c$Observed)) +
+  annotate("text", x = min(alpha.c$Observed) + 0.2*(max(alpha.c$Observed)-min(alpha.c$Observed)), y = max(alpha.c$Observed), label = paste("p = ",rich.p)) + theme(text = element_text(size=12))
+p2 <- qplot(x=alpha.blk$Equitability,y=alpha.res$Equitability) + geom_point() + geom_abline(slope=1,intercept=0,linetype="dashed") + theme_gray() + xlab("Bulk Equitability") + ylab("Resistant Fraction Equitability") + ggtitle("Equitability") + xlim(min(alpha.c$Equitability),max(alpha.c$Equitability)) + ylim(min(alpha.c$Equitability),max(alpha.c$Equitability)) + annotate("text", x = min(alpha.c$Equitability) + 0.2*(max(alpha.c$Equitability)-min(alpha.c$Equitability)), y = max(alpha.c$Equitability), label = paste("p =",even.p)) + theme(text = element_text(size=12))
+p3 <- qplot(x=alpha.blk$Shannon,y=alpha.res$Shannon) + geom_point() + geom_abline(slope=1,intercept=0,linetype="dashed") + theme_gray() + xlab("Bulk Shannon") + ylab("Resistant Fraction Shannon") + ggtitle("Shannon Diversity") + xlim(min(alpha.c$Shannon),max(alpha.c$Shannon)) + ylim(min(alpha.c$Shannon),max(alpha.c$Shannon)) + 
+  annotate("text", x = min(alpha.c$Shannon) + 0.2*(max(alpha.c$Shannon)-min(alpha.c$Shannon)), y = max(alpha.c$Shannon), label = paste("p =",shan.p)) + theme(text = element_text(size=12))
+
+
+```
+determining sharedness of spore-formers/non-spore-formers
+```{r}
+blk.id <- rownames(subset(cohort,TYPE=='BULK')) # grab bulk samples
+res.id <- rownames(subset(cohort,TYPE=='RESIST')) # grab resistant samples
+ps.otu <- otu_table(ps.c1) # grab just the normalized seq table
+coh.types <- droplevels(cohort$TYPE,exclude="NEGATIVE")
+
+# make ordination
+jsd.mds <- ordinate(ps.c1,method="MDS",distance="jsd") # calculate ordination
+col.vec <- c("#A9A9A9","black")
+col.type <- col.vec[coh.types]; names(col.type) <- coh.types
+p.ord <- plot_ordination(ps.c1,jsd.mds,color="TYPE",title="JSD MDS") + scale_color_manual(values=col.type) + theme_gray() + theme(legend.position="bottom") # plot ordination
+
+# calculate jaccard distance between samples (shared membership)
+jac.dist <- vegdist(ps.otu,method="jaccard")
+resist.ano <- anosim(jac.dist,coh.types)
+
+p.ano <- qplot(y=as.vector(jac.dist),x=resist.ano$class.vec,geom="blank") + geom_boxplot()  + theme_gray() + xlab("") + ylab("Jaccard Distance") + theme(legend.position="none") # plot anosim
+
+
+# number of times a sequence was observed
+freq.blk <- apply(ps.otu[blk.id,],2,function(x) sum(x > 0))
+freq.res <- apply(ps.otu[res.id,],2,function(x) sum(x > 0))
+
+res.score <- ps.otu[res.id,]/(ps.otu[res.id,] + ps.otu[blk.id,]) # calculate a resistance score table
+res.cts <- apply(res.score,2,function(x) sum(x > 0.5,na.rm=T)) # identify sequences that are ever enriched in the resistant fraction 
+res.med <- apply(res.score,2,function(x) median(x[x < 1],na.rm=T)) # calculate median resistance
+res.seq <- which(res.cts > 0) # "high" resistance seqs (present in resistant state more than half the times observed)
+nrs.seq <- which(res.cts == 0) # "low" resistance seqs (present in resistant state less than half the times observed)
+
+# categorize sequences by frequency 
+res.freq <- freq.blk[res.seq]
+nrs.freq <- freq.blk[nrs.seq]
+
+freq.tab <- matrix(NA,nrow=24,ncol=3)
+colnames(freq.tab) <- c("FREQUENCY","rOTUs","nOTUs")
+freq.tab[,1] <- seq(1,24,1)
+rownames(freq.tab) <- freq.tab[,1]
+k <- 24
+for (i in 1:24){
+  freq.tab[i,2] <- sum(res.freq == k)
+  freq.tab[i,3] <- sum(nrs.freq == k)
+  k <- k - 1
+}
+freq.tab <- as.data.frame(freq.tab)
+freq.tab <- melt(freq.tab,id="FREQUENCY")
+
+
+colvec <- c()
+colvec[seq(1,24,2)] <- "gray"
+colvec[seq(2,24,2)] <- "lightgray"
+
+p.share <- ggplot(freq.tab,aes(x=variable,y=value,fill=as.factor(FREQUENCY))) + geom_bar(stat="identity") + scale_fill_manual(values=rev(colvec)) + theme_gray() + theme(legend.position = "none") + ylab("# of Sequence Variants") + xlab("") + theme(text = element_text(size=12))
+
+p.image = (p1 / p2 / p3) | (((p.ano + p.ord) / p.share) + plot_layout(nrow=2,heights=c(1,2)))
+p.image = (p1 | p2 | p3) / (p.ano | p.ord | p.share)
+
+```
+TIME SERIES ANALYSIS
+```{r}
+timesp <- subset(meta,STUDY=="TimeSeries")
+
+seqtab.ts <- seqtab.prune[rownames(timesp),]
+
+
+ps.t <- phyloseq(otu_table(seqtab.ts,taxa_are_rows=F),sample_data(timesp),tax_table(tax.prune)) # make phyloseq object for time-series samples
+min.depth.t <- min(rowSums(otu_table(ps.t))) # find minimum read depth of samples
+ps.t1 <- transform_sample_counts(ps.t,function(x) round(min.depth.t*x/sum(x))) # normalize samples to same number of counts 
+ps.otu.t <- otu_table(ps.t1) # grab just the normalized seq table
+
+res.ts <- rownames(subset(timesp,TYPE=='RESIST')) # grab resistant samples
+br.tm <- unlist(strsplit(res.ts,split=".S")) #find bulk matches in res samples 
+blk.ts <- rownames(timesp[br.tm,]) # grab bulk samples
+
+res.scts <- ps.otu.t[res.ts,]/(ps.otu.t[blk.ts,] + ps.otu.t[res.ts,]) # calculate a resistance score table
+res.mts <- apply(res.scts,2,function(x) sum(x > 0.5,na.rm=T)) # calculate median resistance
+res.seq.ts <- colnames(res.scts)[which(res.mts > 0)] # "high" resistance seqs (present in resistant state more than half the times observed)
+nrs.seq.ts <- colnames(res.scts)[which(res.mts == 0)] # "low" resistance seqs (present in resistant state less than half the times observed)
+
+blk.times <- c("TA","TB","TC","T1","T2","T3","T4","T5","T6","T7","T8","T9","T10","T11","T12","T13","T14","T15","T16","T17","T18","T19","T20","T21")
+ps.blk.ts <- ps.otu.t[blk.times,]
+ps.blk.fr <- apply(ps.blk.ts,2,function(x) sum(x > 0))
+freq.min <- which(ps.blk.fr > 11)
+res.tss <- intersect(names(ps.blk.fr)[freq.min],res.seq.ts)
+nrs.tss <- intersect(names(ps.blk.fr)[freq.min],nrs.seq.ts)
+bilo.tx <- colnames(ps.blk.ts)[grep("Bilophila",tax.prune[,6])[1]]
+
+ts.cor <- cor(ps.blk.ts[,c(res.tss,nrs.tss)],method="spearman",use="complete.obs")
+
+# convert correlation matrix into distance matrix
+cor.euc <- vegdist(ts.cor[c(res.tss,nrs.tss),c(res.tss,nrs.tss)],method="euclidean")
+res.vec <- as.factor(c(rep("Enriched",length(res.tss)),rep("Unenriched",length(nrs.tss)))) 
+ts.ano <- anosim(cor.euc,res.vec)
+
+p.tsa <- qplot(y=as.vector(cor.euc),x=ts.ano$class.vec,geom="blank") +  geom_boxplot()  + theme_gray() + xlab("") + ylab("Correlation Distance") + theme(legend.position="none") # plot anosim
+
+ts.corh <- ts.cor
+rownames(ts.corh) <- seq(1,dim(ts.cor)[1],1)
+colnames(ts.corh) <- rownames(ts.corh)
+
+hc <- hclust(dist(ts.corh),method="ward.D")
+hcd <- as.dendrogram(hc)
+col.vec <- rep("white",dim(ts.cor)[1])
+col.vec[1:length(res.tss)] <- "red"
+col.vec[(length(res.tss)+1):(length(res.tss)+length(nrs.tss))] <- "blue"
+
+
+library(dendextend)
+hcd %>% set("leaves_pch", 15) %>%  # node point type
+  set("leaves_cex", 1) %>%  # node point size
+  set("leaves_col", col.vec[order.dendrogram(hcd)]) %>% # node point color
+  set("labels",NULL) %>%
+  plot()
+
+r.t <- as.character(1:length(res.tss))
+n.t <- as.character((length(res.tss)+1):(length(res.tss)+length(nrs.tss)))
+
+k <- cutree(hc,2)
+k.1 <- names(which(k==1))
+k.2 <- names(which(k==2))
+k.r1 <- intersect(k.1,r.t)
+k.r2 <- intersect(k.2,r.t)
+k.n1 <- intersect(k.1,n.t)
+k.n2 <- intersect(k.2,n.t)
+
+```
+analysing metabolomics dataset
+```{r}
+lcms.name <- subset(lcms,Metabolite!="")
+lcms.ts <- apply(lcms.name[,blk.times],2,as.numeric) # subset to time series samples
+k1.ts <- apply(ps.blk.ts[,k.1],1,median) # make a median trace of the resistant cluster
+
+met.cor <- c()
+met.pva <- c()
+for (i in 1:dim(lcms.ts)[1]){
+  tmp <- cor.test(k1.ts,lcms.ts[i,],method="spearman",use="complete.obs")
+  met.cor[i] <- tmp$estimate
+  met.pva[i] <- tmp$p.value
+}
+
+fdr.p <- p.adjust(met.pva,method="fdr")
+
+
+```
+
